@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+.env
+chroma_db/
+bm25_index.pkl
+.streamlit/secrets.toml
