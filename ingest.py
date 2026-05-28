@@ -1,19 +1,14 @@
 """
-ingest_v3.py — Indicizzazione avanzata con BM25 + Vector Search
+ingest.py — Indicizzazione con FAISS + BM25
 
-Miglioramenti rispetto alla versione precedente:
-1. Embeddings migliori (multilingual-e5-large)
-2. Salva anche un indice BM25 per ricerca keyword
-3. Chunking più intelligente
+Usa FAISS al posto di ChromaDB:
+- Niente SQLite = niente problemi di compatibilità
+- File binari portabili (funzionano ovunque)
+- Puoi committare il database su GitHub
 """
-
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
 import os
 import re
-import json
 import shutil
 import pickle
 from rich.console import Console
@@ -21,7 +16,7 @@ from rich.console import Console
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import FAISS
 
 import config
 
@@ -29,7 +24,6 @@ console = Console()
 
 
 def load_markdown(directory: str) -> list:
-    """Carica i file Markdown dalla cartella docs/."""
     documents = []
     md_files = [f for f in os.listdir(directory) if f.endswith((".md", ".markdown"))]
 
@@ -44,7 +38,6 @@ def load_markdown(directory: str) -> list:
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # Spezza per sezioni Markdown (## Titolo)
         raw_sections = re.split(r'(?=^## )', content, flags=re.MULTILINE)
 
         for i, section in enumerate(raw_sections):
@@ -65,32 +58,17 @@ def load_markdown(directory: str) -> list:
 
 
 def split_documents(documents: list) -> list:
-    """Spezza in chunk con separatori ottimizzati per Markdown."""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=config.CHUNK_SIZE,
         chunk_overlap=config.CHUNK_OVERLAP,
-        separators=[
-            "\n## ", "\n### ", "\n#### ",
-            "\n\n", "\n", ". ", " ",
-        ],
+        separators=["\n## ", "\n### ", "\n#### ", "\n\n", "\n", ". ", " "],
     )
     return splitter.split_documents(documents)
 
 
 def build_bm25_index(chunks: list) -> None:
-    """
-    Costruisce un indice BM25 per la ricerca keyword.
-
-    BM25 è un algoritmo di ricerca testuale classico (come Google).
-    Trova documenti che contengono le stesse PAROLE della query.
-    È complementare alla ricerca vettoriale che trova documenti
-    con lo stesso SIGNIFICATO.
-
-    Insieme = hybrid search = molto più efficace.
-    """
     from rank_bm25 import BM25Okapi
 
-    # Tokenizza ogni chunk (split per parole, lowercase)
     tokenized = []
     for chunk in chunks:
         tokens = chunk.page_content.lower().split()
@@ -98,7 +76,6 @@ def build_bm25_index(chunks: list) -> None:
 
     bm25 = BM25Okapi(tokenized)
 
-    # Salva l'indice e i chunk
     with open(config.BM25_INDEX_PATH, "wb") as f:
         pickle.dump({
             "bm25": bm25,
@@ -110,31 +87,31 @@ def build_bm25_index(chunks: list) -> None:
 
 
 def build_vector_store(chunks: list) -> None:
-    """Crea gli embeddings e salvali in ChromaDB."""
-    if os.path.exists(config.CHROMA_DIRECTORY):
-        shutil.rmtree(config.CHROMA_DIRECTORY)
+    if os.path.exists(config.FAISS_INDEX_PATH):
+        shutil.rmtree(config.FAISS_INDEX_PATH)
 
     console.print(f"🧠 Modello embeddings: [cyan]{config.EMBEDDING_MODEL}[/cyan]")
-    console.print("   (il primo avvio scarica il modello, potrebbe volerci un po')")
 
     embeddings = HuggingFaceEmbeddings(
         model_name=config.EMBEDDING_MODEL,
         model_kwargs={"device": "cpu"},
     )
 
-    console.print(f"📦 Creazione vector store con {len(chunks)} chunk...")
+    console.print(f"📦 Creazione FAISS index con {len(chunks)} chunk...")
 
-    Chroma.from_documents(
+    vectorstore = FAISS.from_documents(
         documents=chunks,
         embedding=embeddings,
-        persist_directory=config.CHROMA_DIRECTORY,
     )
 
-    console.print(f"[green]✅ Vector store salvato in '{config.CHROMA_DIRECTORY}/'[/green]")
+    # Salva su disco — crea una cartella con index.faiss e index.pkl
+    vectorstore.save_local(config.FAISS_INDEX_PATH)
+
+    console.print(f"[green]✅ FAISS index salvato in '{config.FAISS_INDEX_PATH}/'[/green]")
 
 
 def main():
-    console.print("\n[bold]🐉 D&D RAG — Indicizzazione Avanzata (BM25 + Vector)[/bold]\n")
+    console.print("\n[bold]🐉 D&D RAG — Indicizzazione (FAISS + BM25)[/bold]\n")
 
     documents = load_markdown(config.PDF_DIRECTORY)
     console.print(f"\n📚 Sezioni caricate: [bold]{len(documents)}[/bold]")
@@ -142,11 +119,10 @@ def main():
     chunks = split_documents(documents)
     console.print(f"✂️  Chunk creati: [bold]{len(chunks)}[/bold]")
 
-    # Costruisci entrambi gli indici
     console.print("\n[bold]1/2 — Indice BM25 (keyword search)[/bold]")
     build_bm25_index(chunks)
 
-    console.print("\n[bold]2/2 — Vector Store (semantic search)[/bold]")
+    console.print("\n[bold]2/2 — FAISS Index (semantic search)[/bold]")
     build_vector_store(chunks)
 
     console.print("\n[dim]--- Esempio di chunk ---[/dim]")

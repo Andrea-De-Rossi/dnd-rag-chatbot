@@ -5,16 +5,7 @@ langchain-core
 langchain-huggingface
 langchain-groq
 langchain-text-splitters
-
+faiss-cpu
 sentence-transformers
 rank-bm25
 rich
-pymupdf
-tiktoken
-onnxruntime
-pysqlite3-binary
-
-protobuf==3.20.3
-chromadb==0.4.24
-numpy==1.26.4
-pydantic<2

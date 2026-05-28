@@ -1,46 +1,28 @@
 """
 app.py — D&D RAG Chatbot con interfaccia web
 
-Lancia con: streamlit run app.py
-
-Features:
-- Interfaccia chat con messaggi stile ChatGPT
-- Memoria conversazionale (ricorda le domande precedenti)
-- Hybrid search (BM25 + Vector)
-- Context window expansion
-- Selezione modello dalla sidebar
+Usa FAISS al posto di ChromaDB = niente problemi SQLite.
+Il database FAISS è committato nella repo e funziona ovunque.
 """
-
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
 import os
 import pickle
 import streamlit as st
 
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import FAISS
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 
+import config
+
 # Se siamo su Streamlit Cloud, leggi la API key dai Secrets
 import config
-if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
-    config.GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-
-@st.cache_resource
-def ensure_database():
-    """Se il database non esiste, lo crea automaticamente."""
-    if not os.path.exists(config.CHROMA_DIRECTORY) or not os.path.exists(config.BM25_INDEX_PATH):
-        import shutil
-        if os.path.exists(config.CHROMA_DIRECTORY):
-            shutil.rmtree(config.CHROMA_DIRECTORY)
-        st.info("⏳ Prima esecuzione: indicizzazione del manuale in corso...")
-        # Importa e lancia direttamente (no subprocess)
-        from ingest import main as run_ingest
-        run_ingest()
-    return True
+try:
+    if "GROQ_API_KEY" in st.secrets:
+        config.GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+except Exception:
+    pass  # In locale usa la key da config.py
 
 # === CONFIGURAZIONE PAGINA ===
 st.set_page_config(
@@ -78,14 +60,20 @@ Risposta:"""
 
 @st.cache_resource
 def load_vector_store():
-    """Carica il vector store (cached, si carica una volta sola)."""
+    """Carica il FAISS index (cached, si carica una volta sola)."""
+    if not os.path.exists(config.FAISS_INDEX_PATH):
+        st.error("❌ FAISS index non trovato! Esegui prima: python ingest.py")
+        st.stop()
+
     embeddings = HuggingFaceEmbeddings(
         model_name=config.EMBEDDING_MODEL,
         model_kwargs={"device": "cpu"},
     )
-    return Chroma(
-        persist_directory=config.CHROMA_DIRECTORY,
-        embedding_function=embeddings,
+
+    return FAISS.load_local(
+        config.FAISS_INDEX_PATH,
+        embeddings,
+        allow_dangerous_deserialization=True,
     )
 
 
@@ -165,7 +153,6 @@ def hybrid_search(question, vectorstore, bm25_data, top_k=8):
                     scores[doc_id] = 1.0 / (k_rrf + rank + 1)
                     chunk_map[doc_id] = doc
 
-    # Ordina e deduplicaresults
     sorted_ids = sorted(scores, key=scores.get, reverse=True)[:top_k]
     results = []
     seen = set()
@@ -180,59 +167,40 @@ def hybrid_search(question, vectorstore, bm25_data, top_k=8):
     if bm25_data:
         results = expand_context(results, bm25_data["chunks"], window=1)
 
-    return results[:10]
+    return results[:12]
 
 
 # === MEMORIA CONVERSAZIONALE ===
 
 def format_history(messages, max_turns=4):
-    """
-    Formatta gli ultimi N scambi come stringa per il prompt.
-
-    Mantiene solo le ultime max_turns domande/risposte
-    per non riempire il contesto del modello.
-    """
     history_pairs = []
     for i in range(0, len(messages) - 1, 2):
         if i + 1 < len(messages):
             q = messages[i]["content"]
             a = messages[i + 1]["content"]
-            # Tronca risposte lunghe nella history
             if len(a) > 300:
                 a = a[:300] + "..."
             history_pairs.append(f"Utente: {q}\nAssistente: {a}")
 
-    # Prendi solo gli ultimi max_turns scambi
     recent = history_pairs[-max_turns:]
-
     if not recent:
         return "Nessuna conversazione precedente."
-
     return "\n\n".join(recent)
 
 
 def ask_question(question, vectorstore, bm25_data, llm, messages):
-    """Esegue la domanda con hybrid search e memoria."""
-
-    # Retrieval
     source_docs = hybrid_search(question, vectorstore, bm25_data)
     context = "\n\n---\n\n".join(doc.page_content for doc in source_docs)
-
-    # History
     history = format_history(messages)
 
-    # Prompt
     prompt = PromptTemplate(
         template=PROMPT_WITH_MEMORY,
         input_variables=["context", "question", "history"],
     )
     formatted_prompt = prompt.format(
-        context=context,
-        question=question,
-        history=history,
+        context=context, question=question, history=history,
     )
 
-    # LLM
     answer = llm.invoke(formatted_prompt)
     if hasattr(answer, 'content'):
         answer = answer.content
@@ -268,10 +236,10 @@ with st.sidebar:
     st.markdown("""
     **Stack tecnico:**
     - 📄 MinerU (PDF → Markdown)
-    - 🔍 Hybrid Search (BM25 + Vector)
+    - 🔍 Hybrid Search (BM25 + FAISS)
     - 🧠 Embeddings: multilingual-e5-large
     - 🤖 LLM: Groq Cloud
-    - 💾 ChromaDB
+    - 💾 FAISS Vector Store
     """)
 
 
@@ -280,11 +248,8 @@ with st.sidebar:
 st.title("🐉 D&D RAG Chatbot")
 st.caption("Fammi una domanda sul Player's Handbook di D&D 5e!")
 
-# Inizializza stato sessione
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
-ensure_database()
 
 # Carica risorse
 vectorstore = load_vector_store()
@@ -294,8 +259,6 @@ bm25_data = load_bm25_index()
 for message in st.session_state.messages:
     with st.chat_message(message["role"], avatar="🧙" if message["role"] == "user" else "🐉"):
         st.markdown(message["content"])
-
-        # Mostra fonti se presenti
         if "sources" in message and message["sources"]:
             with st.expander(f"📖 Fonti ({len(message['sources'])})"):
                 for i, src in enumerate(message["sources"], 1):
@@ -306,19 +269,15 @@ for message in st.session_state.messages:
 
 # Input utente
 if prompt := st.chat_input("Scrivi la tua domanda..."):
-
-    # Mostra messaggio utente
     with st.chat_message("user", avatar="🧙"):
         st.markdown(prompt)
 
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # Genera risposta
     with st.chat_message("assistant", avatar="🐉"):
         with st.spinner("🔍 Cerco nel manuale..."):
             model_id = AVAILABLE_MODELS[selected_model]
             llm = get_llm(model_id)
-
             answer, sources = ask_question(
                 prompt, vectorstore, bm25_data, llm,
                 st.session_state.messages
@@ -326,9 +285,8 @@ if prompt := st.chat_input("Scrivi la tua domanda..."):
 
         st.markdown(answer)
 
-        # Mostra fonti
+        source_data = []
         if sources:
-            source_data = []
             with st.expander(f"📖 Fonti ({len(sources)})"):
                 for i, doc in enumerate(sources, 1):
                     source = doc.metadata.get("source_file", "?")
@@ -341,9 +299,8 @@ if prompt := st.chat_input("Scrivi la tua domanda..."):
                         "preview": preview,
                     })
 
-    # Salva risposta
     st.session_state.messages.append({
         "role": "assistant",
         "content": answer,
-        "sources": source_data if sources else [],
+        "sources": source_data,
     })
