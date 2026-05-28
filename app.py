@@ -32,10 +32,14 @@ if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
 @st.cache_resource
 def ensure_database():
     """Se il database non esiste, lo crea automaticamente."""
-    if not os.path.exists(config.CHROMA_DIRECTORY):
-        import subprocess
-        st.info("⏳ Prima esecuzione: indicizzazione del manuale...")
-        subprocess.run(["python", "ingest.py"], check=True)
+    if not os.path.exists(config.CHROMA_DIRECTORY) or not os.path.exists(config.BM25_INDEX_PATH):
+        import shutil
+        if os.path.exists(config.CHROMA_DIRECTORY):
+            shutil.rmtree(config.CHROMA_DIRECTORY)
+        st.info("⏳ Prima esecuzione: indicizzazione del manuale in corso...")
+        # Importa e lancia direttamente (no subprocess)
+        from ingest import main as run_ingest
+        run_ingest()
     return True
 
 # === CONFIGURAZIONE PAGINA ===
