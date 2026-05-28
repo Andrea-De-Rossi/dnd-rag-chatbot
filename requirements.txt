@@ -12,6 +12,7 @@ rich
 pymupdf
 tiktoken
 onnxruntime
+pysqlite3-binary
 
 protobuf==3.20.3
 chromadb==0.4.24
