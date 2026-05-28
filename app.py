@@ -20,7 +20,19 @@ from langchain_community.vectorstores import Chroma
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 
+# Se siamo su Streamlit Cloud, leggi la API key dai Secrets
 import config
+if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
+    config.GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+
+@st.cache_resource
+def ensure_database():
+    """Se il database non esiste, lo crea automaticamente."""
+    if not os.path.exists(config.CHROMA_DIRECTORY):
+        import subprocess
+        st.info("⏳ Prima esecuzione: indicizzazione del manuale...")
+        subprocess.run(["python", "ingest.py"], check=True)
+    return True
 
 # === CONFIGURAZIONE PAGINA ===
 st.set_page_config(
@@ -263,6 +275,8 @@ st.caption("Fammi una domanda sul Player's Handbook di D&D 5e!")
 # Inizializza stato sessione
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+ensure_database()
 
 # Carica risorse
 vectorstore = load_vector_store()
